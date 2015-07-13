@@ -1,29 +1,25 @@
-﻿#if UNITY_2_6 || UNITY_3_0 || UNITY_3_1 || UNITY_3_2 || UNITY_3_3 || UNITY_3_4 || UNITY_3_5 || UNITY_4_0 || UNITY_4_1 || UNITY_4_2
-#define UNITY_4_2_OR_LOWER
-#endif
-
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEditor;
-using System.Collections;
 using System.Collections.Generic;
-using System.Reflection;
 
 [CustomEditor(typeof(PolyMesh))]
 public class PolyMeshEditor : Editor
 {
+	// Using a static flag to tell OnSceneGui when an undo was made while editing
+	// because static variables stats survive Unity's undo/redo system
+	private static bool UNDO_WHILE_EDIT = false;
+	
 	enum State { Hover, Drag, BoxSelect, DragSelected, RotateSelected, ScaleSelected, Extrude }
-
+	
 	const float clickRadius = 0.12f;
-
-	FieldInfo undoCallback;
+	
 	bool editing;
-	bool tabDown;
 	State state;
-
+	
 	List<Vector3> keyPoints;
 	List<Vector3> curvePoints;
 	List<bool> isCurve;
-
+	
 	Matrix4x4 worldToLocal;
 	Quaternion inverseRotation;
 	
@@ -32,7 +28,7 @@ public class PolyMeshEditor : Editor
 	Vector3 screenMousePosition;
 	MouseCursor mouseCursor = MouseCursor.Arrow;
 	float snap;
-
+	
 	int dragIndex;
 	List<int> selectedIndices = new List<int>();
 	int nearestLine;
@@ -40,17 +36,28 @@ public class PolyMeshEditor : Editor
 	bool extrudeKeyDown;
 	bool doExtrudeUpdate;
 	bool draggingCurve;
-
+	
+	void OnEnable()
+	{
+		// Listen for undo/redo from the editor
+		Undo.undoRedoPerformed += OnUndoRedo;
+	}
+	
+	void OnDisable()
+	{
+		Undo.undoRedoPerformed -= OnUndoRedo;
+	}
+	
 	#region Inspector GUI
-
+	
 	public override void OnInspectorGUI()
 	{
 		if (target == null)
 			return;
-
+		
 		if (polyMesh.keyPoints.Count == 0)
 			CreateSquare(polyMesh, 0.5f);
-
+		
 		//Toggle editing mode
 		if (editing)
 		{
@@ -64,6 +71,82 @@ public class PolyMeshEditor : Editor
 		{
 			editing = true;
 			HideWireframe(hideWireframe);
+		}
+		
+		//Mesh settings
+		if (meshSettings = EditorGUILayout.Foldout(meshSettings, "Mesh"))
+		{
+			var color = EditorGUILayout.ColorField("Mesh Color", polyMesh.meshVertexColor);
+			polyMesh.meshVertexColor = color;
+
+			var curveDetail = EditorGUILayout.Slider("Curve Detail", polyMesh.curveDetail, 0.01f, 1f);
+			curveDetail = Mathf.Clamp(curveDetail, 0.01f, 1f);
+			if (GUI.changed)
+			{
+				RecordUndo();
+				polyMesh.curveDetail = curveDetail;
+			}
+			
+			//Buttons
+			EditorGUILayout.BeginHorizontal();
+			if (GUILayout.Button("Build Mesh"))
+				polyMesh.BuildMesh();
+			if (GUILayout.Button("Make Mesh Unique"))
+			{
+				RecordUndo();
+				polyMesh.GetComponent<MeshFilter>().mesh = null;
+				polyMesh.BuildMesh();
+			}
+			EditorGUILayout.EndHorizontal();
+		}
+
+		//Create collider
+		if (colliderSettings = EditorGUILayout.Foldout(colliderSettings, "Collider"))
+		{
+			//Polygon Collider for 2D stuff.
+			var buildColliderPolygonCollider = EditorGUILayout.Toggle("Use PolygonCollider2D", polyMesh.buildColliderPolygonCollider);
+			//Collider depth
+			var colliderDepth = EditorGUILayout.FloatField("Depth", polyMesh.colliderDepth);
+			colliderDepth = Mathf.Max(colliderDepth, 0.01f);
+			var buildColliderEdges = EditorGUILayout.Toggle("Build Edges", polyMesh.buildColliderEdges);
+			//var buildColliderFront = EditorGUILayout.Toggle("Build Front", polyMesh.buildColliderFront);
+			if (GUI.changed)
+			{
+				RecordUndo();
+				polyMesh.colliderDepth = colliderDepth;
+				polyMesh.buildColliderEdges = buildColliderEdges;
+				//polyMesh.buildColliderFront = buildColliderFront;
+				polyMesh.buildColliderPolygonCollider = buildColliderPolygonCollider;
+			}
+			
+			//Destroy collider
+			if (polyMesh.meshCollider == null && polyMesh.polyCollider == null)
+			{
+				if (GUILayout.Button("Create Collider"))
+				{
+					RecordDeepUndo();
+					GameObject obj;
+					if (buildColliderPolygonCollider) {
+						obj = new GameObject("Collider", typeof(PolygonCollider2D));
+						polyMesh.polyCollider = obj.GetComponent<PolygonCollider2D>();
+					} else {
+						obj = new GameObject("Collider", typeof(MeshCollider));
+						polyMesh.meshCollider = obj.GetComponent<MeshCollider>();
+					}
+					
+					obj.transform.parent = polyMesh.transform;
+					obj.transform.localPosition = Vector3.zero;
+				}
+			}
+			else if (GUILayout.Button("Destroy Collider"))
+			{
+				RecordDeepUndo();
+				if (polyMesh.meshCollider) {
+					DestroyImmediate(polyMesh.meshCollider.gameObject);
+				} else if (polyMesh.polyCollider) {
+					DestroyImmediate(polyMesh.polyCollider.gameObject);
+				}
+			}
 		}
 
 		//UV settings
@@ -88,93 +171,11 @@ public class PolyMeshEditor : Editor
 				polyMesh.uvRotation = 0;
 			}
 		}
-
-		//Mesh settings
-		if (meshSettings = EditorGUILayout.Foldout(meshSettings, "Mesh"))
-		{
-			var curveDetail = EditorGUILayout.Slider("Curve Detail", polyMesh.curveDetail, 0.01f, 1f);
-			curveDetail = Mathf.Clamp(curveDetail, 0.01f, 1f);
-			if (GUI.changed)
-			{
-				RecordUndo();
-				polyMesh.curveDetail = curveDetail;
-			}
-
-			//Buttons
-			EditorGUILayout.BeginHorizontal();
-			if (GUILayout.Button("Build Mesh"))
-				polyMesh.BuildMesh();
-			if (GUILayout.Button("Make Mesh Unique"))
-			{
-				RecordUndo();
-				polyMesh.GetComponent<MeshFilter>().mesh = null;
-				polyMesh.BuildMesh();
-			}
-			EditorGUILayout.EndHorizontal();
-		}
-
-		//Create collider
-		if (colliderSettings = EditorGUILayout.Foldout(colliderSettings, "Collider"))
-		{
-#if !UNITY_4_2_OR_LOWER
-			//Polygon Collider for 2D stuff.
-			var buildColliderPolygonCollider = EditorGUILayout.Toggle("PolygonCollider2D", polyMesh.buildColliderPolygonCollider);
-#endif
-			//Collider depth
-			var colliderDepth = EditorGUILayout.FloatField("Depth", polyMesh.colliderDepth);
-			colliderDepth = Mathf.Max(colliderDepth, 0.01f);
-			var buildColliderEdges = EditorGUILayout.Toggle("Build Edges", polyMesh.buildColliderEdges);
-			var buildColliderFront = EditorGUILayout.Toggle("Build Font", polyMesh.buildColliderFront);
-			if (GUI.changed)
-			{
-				RecordUndo();
-				polyMesh.colliderDepth = colliderDepth;
-				polyMesh.buildColliderEdges = buildColliderEdges;
-				polyMesh.buildColliderFront = buildColliderFront;
-#if !UNITY_4_2_OR_LOWER
-				polyMesh.buildColliderPolygonCollider = buildColliderPolygonCollider;
-#endif
-			}
-
-			//Destroy collider
-			if (polyMesh.meshCollider == null)
-			{
-				if (GUILayout.Button("Create Collider"))
-				{
-					RecordDeepUndo();
-
-#if !UNITY_4_2_OR_LOWER
-					GameObject obj;
-					if (buildColliderPolygonCollider) {
-						obj = new GameObject("Collider", typeof(PolygonCollider2D));
-						polyMesh.polyCollider = obj.GetComponent<PolygonCollider2D>();
-					} else {
-						obj = new GameObject("Collider", typeof(MeshCollider));
-						polyMesh.meshCollider = obj.GetComponent<MeshCollider>();
-					}
-#else
-					var obj = new GameObject("Collider", typeof(MeshCollider));
-					polyMesh.meshCollider = obj.GetComponent<MeshCollider>();
-#endif
-					obj.transform.parent = polyMesh.transform;
-					obj.transform.localPosition = Vector3.zero;
-				}
-			}
-			else if (GUILayout.Button("Destroy Collider"))
-			{
-				RecordDeepUndo();
-				if (polyMesh.meshCollider) {
-					DestroyImmediate(polyMesh.meshCollider.gameObject);
-				} else if (polyMesh.polyCollider) {
-					DestroyImmediate(polyMesh.polyCollider.gameObject);
-				}
-			}
-		}
-
+		
 		//Update mesh
 		if (GUI.changed)
 			polyMesh.BuildMesh();
-
+		
 		//Editor settings
 		if (editorSettings = EditorGUILayout.Foldout(editorSettings, "Editor"))
 		{
@@ -185,26 +186,33 @@ public class PolyMeshEditor : Editor
 			hideWireframe = EditorGUILayout.Toggle("Hide Wireframe", hideWireframe);
 			if (EditorGUI.EndChangeCheck())
 				HideWireframe(hideWireframe);
-
+			
 			editKey = (KeyCode)EditorGUILayout.EnumPopup("[Toggle Edit] Key", editKey);
 			selectAllKey = (KeyCode)EditorGUILayout.EnumPopup("[Select All] Key", selectAllKey);
 			splitKey = (KeyCode)EditorGUILayout.EnumPopup("[Split] Key", splitKey);
 			extrudeKey = (KeyCode)EditorGUILayout.EnumPopup("[Extrude] Key", extrudeKey);
 		}
 	}
-
+	
 	#endregion
-
+	
 	#region Scene GUI
-
+	
 	void OnSceneGUI()
 	{
 		if (target == null)
 			return;
-
+		
 		if (KeyPressed(editKey))
 			editing = !editing;
-
+		
+		// Using a static flag, because static seems to survive the undo/redo process
+		if (UNDO_WHILE_EDIT)
+		{
+			editing = true;
+			UNDO_WHILE_EDIT = false;
+		}
+		
 		if (editing)
 		{
 			//Update lists
@@ -214,18 +222,10 @@ public class PolyMeshEditor : Editor
 				curvePoints = new List<Vector3>(polyMesh.curvePoints);
 				isCurve = new List<bool>(polyMesh.isCurve);
 			}
-
-			//Crazy hack to register undo
-			if (undoCallback == null)
-			{
-				undoCallback = typeof(EditorApplication).GetField("undoRedoPerformed", BindingFlags.NonPublic | BindingFlags.Static);
-				if (undoCallback != null)
-					undoCallback.SetValue(null, new EditorApplication.CallbackFunction(OnUndoRedo));
-			}
-
+			
 			//Load handle matrix
 			Handles.matrix = polyMesh.transform.localToWorldMatrix;
-
+			
 			//Draw points and lines
 			DrawAxis();
 			Handles.color = Color.white;
@@ -247,7 +247,7 @@ public class PolyMeshEditor : Editor
 					DrawCurvePoint(i);
 				}
 			}
-
+			
 			//Quit on tool change
 			if (e.type == EventType.KeyDown)
 			{
@@ -260,22 +260,21 @@ public class PolyMeshEditor : Editor
 					return;
 				}
 			}
-
+			
 			//Quit if panning or no camera exists
 			if (Tools.current == Tool.View || (e.isMouse && e.button > 0) || Camera.current == null || e.type == EventType.ScrollWheel)
 				return;
-
+			
 			//Quit if laying out
 			if (e.type == EventType.Layout)
 			{
 				HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
 				return;
 			}
-
 			//Cursor rectangle
 			EditorGUIUtility.AddCursorRect(new Rect(0, 0, Camera.current.pixelWidth, Camera.current.pixelHeight), mouseCursor);
 			mouseCursor = MouseCursor.Arrow;
-
+			
 			//Extrude key state
 			if (e.keyCode == extrudeKey)
 			{
@@ -287,7 +286,7 @@ public class PolyMeshEditor : Editor
 				else if (e.type == EventType.KeyDown)
 					extrudeKeyDown = true;
 			}
-
+			
 			//Update matrices and snap
 			worldToLocal = polyMesh.transform.worldToLocalMatrix;
 			inverseRotation = Quaternion.Inverse(polyMesh.transform.rotation) * Camera.current.transform.rotation;
@@ -302,7 +301,7 @@ public class PolyMeshEditor : Editor
 				mousePosition = worldToLocal.MultiplyPoint(ray.GetPoint(hit));
 			else
 				return;
-
+			
 			//Update nearest line and split position
 			nearestLine = NearestLine(out splitPosition);
 			
@@ -311,41 +310,29 @@ public class PolyMeshEditor : Editor
 			if (state != newState)
 				SetState(newState);
 			HandleUtility.Repaint();
-			e.Use();
 		}
 	}
-
+	
 	void HideWireframe(bool hide)
 	{
-		if (polyMesh.renderer != null)
-			EditorUtility.SetSelectedWireframeHidden(polyMesh.renderer, hide);
+		if (polyMesh.GetComponent<Renderer>() != null)
+			EditorUtility.SetSelectedWireframeHidden(polyMesh.GetComponent<Renderer>(), hide);
 	}
-
+	
 	void RecordUndo()
 	{
-#if UNITY_4_2_OR_LOWER
-		Undo.RegisterUndo(target, "PolyMesh Changed");
-#else
 		Undo.RecordObject(target, "PolyMesh Changed");
-#endif
 	}
-
+	
 	void RecordDeepUndo()
 	{
-#if UNITY_4_2_OR_LOWER
-		Undo.RegisterSceneUndo("PolyMesh Changed");
-#elif UNITY_4_3
-		Undo.RegisterFullObjectHierarchyUndo(target);
-#else
 		Undo.RegisterFullObjectHierarchyUndo(target, "PolyMesh Changed");
-#endif
-
 	}
-
+	
 	#endregion
-
+	
 	#region State Control
-
+	
 	//Initialize state
 	void SetState(State newState)
 	{
@@ -356,7 +343,7 @@ public class PolyMeshEditor : Editor
 			break;
 		}
 	}
-
+	
 	//Update state
 	State UpdateState()
 	{
@@ -364,9 +351,9 @@ public class PolyMeshEditor : Editor
 		{
 			//Hovering
 		case State.Hover:
-
+			
 			DrawNearestLineAndSplit();
-
+			
 			if (Tools.current == Tool.Move && TryDragSelected())
 				return State.DragSelected;
 			if (Tools.current == Tool.Rotate && TryRotateSelected())
@@ -375,23 +362,23 @@ public class PolyMeshEditor : Editor
 				return State.ScaleSelected;
 			if (Tools.current == Tool.Move && TryExtrude())
 				return State.Extrude;
-
+			
 			if (TrySelectAll())
 				return State.Hover;
 			if (TrySplitLine())
 				return State.Hover;
 			if (TryDeleteSelected())
 				return State.Hover;
-
+			
 			if (TryHoverCurvePoint(out dragIndex) && TryDragCurvePoint(dragIndex))
 				return State.Drag;
 			if (TryHoverKeyPoint(out dragIndex) && TryDragKeyPoint(dragIndex))
 				return State.Drag;
 			if (TryBoxSelect())
 				return State.BoxSelect;
-
+			
 			break;
-
+			
 			//Dragging
 		case State.Drag:
 			mouseCursor = MouseCursor.MoveArrow;
@@ -403,13 +390,13 @@ public class PolyMeshEditor : Editor
 			if (TryStopDrag())
 				return State.Hover;
 			break;
-
+			
 			//Box Selecting
 		case State.BoxSelect:
 			if (TryBoxSelectEnd())
 				return State.Hover;
 			break;
-
+			
 			//Dragging selected
 		case State.DragSelected:
 			mouseCursor = MouseCursor.MoveArrow;
@@ -417,7 +404,7 @@ public class PolyMeshEditor : Editor
 			if (TryStopDrag())
 				return State.Hover;
 			break;
-
+			
 			//Rotating selected
 		case State.RotateSelected:
 			mouseCursor = MouseCursor.RotateArrow;
@@ -425,7 +412,7 @@ public class PolyMeshEditor : Editor
 			if (TryStopDrag())
 				return State.Hover;
 			break;
-
+			
 			//Scaling selected
 		case State.ScaleSelected:
 			mouseCursor = MouseCursor.ScaleArrow;
@@ -433,7 +420,7 @@ public class PolyMeshEditor : Editor
 			if (TryStopDrag())
 				return State.Hover;
 			break;
-
+			
 			//Extruding
 		case State.Extrude:
 			mouseCursor = MouseCursor.MoveArrow;
@@ -449,10 +436,15 @@ public class PolyMeshEditor : Editor
 		}
 		return state;
 	}
-
+	
 	//Update the mesh on undo/redo
 	void OnUndoRedo()
 	{
+		// If undo/redo was called while editing
+		// mark it for OnSceneGui to reset the editing flag
+		// after the unity editor has completed the undo/redo process
+		UNDO_WHILE_EDIT = editing;
+		
 		keyPoints = new List<Vector3>(polyMesh.keyPoints);
 		curvePoints = new List<Vector3>(polyMesh.curvePoints);
 		isCurve = new List<bool>(polyMesh.isCurve);
@@ -502,7 +494,7 @@ public class PolyMeshEditor : Editor
 				polyMesh.curvePoints[i] = curvePoints[i] = Vector3.Lerp(keyPoints[i], keyPoints[(i + 1) % keyPoints.Count], 0.5f);
 		polyMesh.BuildMesh();
 	}
-
+	
 	void MoveKeyPoint(int index, Vector3 amount)
 	{
 		var moveCurve = selectedIndices.Contains((index + 1) % keyPoints.Count);
@@ -529,7 +521,7 @@ public class PolyMeshEditor : Editor
 				curvePoints[index] = polyMesh.curvePoints[index] + amount;
 		}
 	}
-
+	
 	void MoveCurvePoint(int index, Vector3 amount)
 	{
 		isCurve[index] = true;
@@ -543,29 +535,29 @@ public class PolyMeshEditor : Editor
 		else
 			curvePoints[index] = polyMesh.curvePoints[index] + amount;
 	}
-
-
+	
+	
 	void MoveSelected(Vector3 amount)
 	{
 		foreach (var i in selectedIndices)
 			MoveKeyPoint(i, amount);
 	}
-
+	
 	void RotateSelected()
 	{
 		var center = GetSelectionCenter();
-
+		
 		Handles.color = Color.white;
 		Handles.DrawLine(center, clickPosition);
 		Handles.color = Color.green;
 		Handles.DrawLine(center, mousePosition);
-
+		
 		var clickOffset = clickPosition - center;
 		var mouseOffset = mousePosition - center;
 		var clickAngle = Mathf.Atan2(clickOffset.y, clickOffset.x);
 		var mouseAngle = Mathf.Atan2(mouseOffset.y, mouseOffset.x);
 		var angleOffset = mouseAngle - clickAngle;
-
+		
 		foreach (var i in selectedIndices)
 		{
 			var point = polyMesh.keyPoints[i];
@@ -575,15 +567,15 @@ public class PolyMeshEditor : Editor
 			keyPoints[i] = center + new Vector3(Mathf.Cos(a) * d, Mathf.Sin(a) * d);
 		}
 	}
-
+	
 	void ScaleSelected()
 	{
 		Handles.color = Color.green;
 		Handles.DrawLine(clickPosition, mousePosition);
-
+		
 		var center = GetSelectionCenter();
 		var scale = mousePosition - clickPosition;
-
+		
 		//Uniform scaling if shift pressed
 		if (e.shift)
 		{
@@ -592,7 +584,7 @@ public class PolyMeshEditor : Editor
 			else
 				scale.x = scale.y;
 		}
-
+		
 		//Determine direction of scaling
 		if (scale.x < 0)
 			scale.x = 1 / (-scale.x + 1);
@@ -602,7 +594,7 @@ public class PolyMeshEditor : Editor
 			scale.y = 1 / (-scale.y + 1);
 		else
 			scale.y = 1 + scale.y;
-
+		
 		foreach (var i in selectedIndices)
 		{
 			var point = polyMesh.keyPoints[i];
@@ -612,11 +604,11 @@ public class PolyMeshEditor : Editor
 			keyPoints[i] = center + offset;
 		}
 	}
-
+	
 	#endregion
-
+	
 	#region Drawing
-
+	
 	void DrawAxis()
 	{
 		Handles.color = Color.red;
@@ -624,17 +616,17 @@ public class PolyMeshEditor : Editor
 		Handles.DrawLine(new Vector3(-size, 0), new Vector3(size, 0));
 		Handles.DrawLine(new Vector3(0, -size), new Vector2(0, size));
 	}
-
+	
 	void DrawKeyPoint(int index)
 	{
 		Handles.DotCap(0, keyPoints[index], Quaternion.identity, HandleUtility.GetHandleSize(keyPoints[index]) * 0.03f);
 	}
-
+	
 	void DrawCurvePoint(int index)
 	{
 		Handles.DotCap(0, curvePoints[index], Quaternion.identity, HandleUtility.GetHandleSize(keyPoints[index]) * 0.03f);
 	}
-
+	
 	void DrawSegment(int index)
 	{
 		var from = keyPoints[index];
@@ -649,12 +641,12 @@ public class PolyMeshEditor : Editor
 		else
 			Handles.DrawLine(from, to);
 	}
-
+	
 	void DrawCircle(Vector3 position, float size)
 	{
 		Handles.CircleCap(0, position, inverseRotation, HandleUtility.GetHandleSize(position) * size);
 	}
-
+	
 	void DrawNearestLineAndSplit()
 	{
 		if (nearestLine >= 0)
@@ -665,11 +657,11 @@ public class PolyMeshEditor : Editor
 			Handles.DotCap(0, splitPosition, Quaternion.identity, HandleUtility.GetHandleSize(splitPosition) * 0.03f);
 		}
 	}
-
+	
 	#endregion
-
+	
 	#region State Checking
-
+	
 	bool TryHoverKeyPoint(out int index)
 	{
 		if (TryHover(keyPoints, Color.white, out index))
@@ -679,7 +671,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryHoverCurvePoint(out int index)
 	{
 		if (TryHover(curvePoints, Color.white, out index))
@@ -689,7 +681,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryDragKeyPoint(int index)
 	{
 		if (TryDrag(keyPoints, index))
@@ -699,7 +691,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryDragCurvePoint(int index)
 	{
 		if (TryDrag(curvePoints, index))
@@ -709,7 +701,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryHover(List<Vector3> points, Color color, out int index)
 	{
 		if (Tools.current == Tool.Move)
@@ -725,7 +717,7 @@ public class PolyMeshEditor : Editor
 		index = -1;
 		return false;
 	}
-
+	
 	bool TryDrag(List<Vector3> points, int index)
 	{
 		if (e.type == EventType.MouseDown && IsHovering(points[index]))
@@ -735,7 +727,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryStopDrag()
 	{
 		if (e.type == EventType.MouseUp)
@@ -746,7 +738,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryBoxSelect()
 	{
 		if (e.type == EventType.MouseDown)
@@ -756,7 +748,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryBoxSelectEnd()
 	{
 		var min = new Vector3(Mathf.Min(clickPosition.x, mousePosition.x), Mathf.Min(clickPosition.y, mousePosition.y));
@@ -766,22 +758,22 @@ public class PolyMeshEditor : Editor
 		Handles.DrawLine(new Vector3(min.x, max.y), new Vector3(max.x, max.y));
 		Handles.DrawLine(new Vector3(min.x, min.y), new Vector3(min.x, max.y));
 		Handles.DrawLine(new Vector3(max.x, min.y), new Vector3(max.x, max.y));
-
+		
 		if (e.type == EventType.MouseUp)
 		{
 			var rect = new Rect(min.x, min.y, max.x - min.x, max.y - min.y);
-
+			
 			if (!control)
 				selectedIndices.Clear();
 			for (int i = 0; i < keyPoints.Count; i++)
 				if (rect.Contains(keyPoints[i]))
 					selectedIndices.Add(i);
-
+			
 			return true;
 		}
 		return false;
 	}
-
+	
 	bool TryDragSelected()
 	{
 		if (selectedIndices.Count > 0 && TryDragButton(GetSelectionCenter(), 0.2f))
@@ -791,7 +783,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryRotateSelected()
 	{
 		if (selectedIndices.Count > 0 && TryRotateButton(GetSelectionCenter(), 0.3f))
@@ -801,7 +793,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryScaleSelected()
 	{
 		if (selectedIndices.Count > 0 && TryScaleButton(GetSelectionCenter(), 0.3f))
@@ -811,7 +803,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryDragButton(Vector3 position, float size)
 	{
 		size *= HandleUtility.GetHandleSize(position);
@@ -833,7 +825,7 @@ public class PolyMeshEditor : Editor
 		Handles.RectangleCap(0, position, Quaternion.identity, size);
 		return false;
 	}
-
+	
 	bool TryRotateButton(Vector3 position, float size)
 	{
 		size *= HandleUtility.GetHandleSize(position);
@@ -855,7 +847,7 @@ public class PolyMeshEditor : Editor
 		Handles.CircleCap(0, position, inverseRotation, size + buffer / 2);
 		return false;
 	}
-
+	
 	bool TryScaleButton(Vector3 position, float size)
 	{
 		size *= HandleUtility.GetHandleSize(position);
@@ -879,7 +871,7 @@ public class PolyMeshEditor : Editor
 		Handles.RectangleCap(0, position, Quaternion.identity, size);
 		return false;
 	}
-
+	
 	bool TrySelectAll()
 	{
 		if (KeyPressed(selectAllKey))
@@ -891,7 +883,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TrySplitLine()
 	{
 		if (nearestLine >= 0 && KeyPressed(splitKey))
@@ -914,7 +906,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryExtrude()
 	{
 		if (nearestLine >= 0 && extrudeKeyDown && e.type == EventType.MouseDown)
@@ -952,7 +944,7 @@ public class PolyMeshEditor : Editor
 				selectedIndices.Add(a + 2);
 			}
 			isCurve[nearestLine] = false;
-
+			
 			clickPosition = mousePosition;
 			doExtrudeUpdate = true;
 			UpdatePoly(true, true);
@@ -960,7 +952,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool TryDeleteSelected()
 	{
 		if (KeyPressed(KeyCode.Backspace) || KeyPressed(KeyCode.Delete))
@@ -989,7 +981,7 @@ public class PolyMeshEditor : Editor
 		}
 		return false;
 	}
-
+	
 	bool IsHovering(Vector3 point)
 	{
 		return Vector3.Distance(mousePosition, point) < HandleUtility.GetHandleSize(point) * clickRadius;
@@ -1040,12 +1032,12 @@ public class PolyMeshEditor : Editor
 		}
 		return near;
 	}
-
+	
 	bool KeyPressed(KeyCode key)
 	{
 		return e.type == EventType.KeyDown && e.keyCode == key;
 	}
-
+	
 	bool KeyReleased(KeyCode key)
 	{
 		return e.type == EventType.KeyUp && e.keyCode == key;
@@ -1057,7 +1049,7 @@ public class PolyMeshEditor : Editor
 		value.y = Mathf.Round(value.y / snap) * snap;
 		return value;
 	}
-
+	
 	Vector3 GetSelectionCenter()
 	{
 		if (polyMesh.keyPoints.Count > 1)
@@ -1083,107 +1075,107 @@ public class PolyMeshEditor : Editor
 		else
 			return polyMesh.keyPoints[0];
 	}
-
+	
 	#endregion
-
+	
 	#region Properties
-
+	
 	PolyMesh polyMesh
 	{
 		get { return (PolyMesh)target; }
 	}
-
+	
 	Event e
 	{
 		get { return Event.current; }
 	}
-
+	
 	bool control
 	{
 		get { return Application.platform == RuntimePlatform.OSXEditor ? e.command : e.control; }
 	}
-
+	
 	bool doSnap
 	{
 		get { return autoSnap ? !control : control; }
 	}
-
+	
 	static bool meshSettings
 	{
 		get { return EditorPrefs.GetBool("PolyMeshEditor_meshSettings", false); }
 		set { EditorPrefs.SetBool("PolyMeshEditor_meshSettings", value); }
 	}
-
+	
 	static bool colliderSettings
 	{
 		get { return EditorPrefs.GetBool("PolyMeshEditor_colliderSettings", false); }
 		set { EditorPrefs.SetBool("PolyMeshEditor_colliderSettings", value); }
 	}
-
+	
 	static bool uvSettings
 	{
 		get { return EditorPrefs.GetBool("PolyMeshEditor_uvSettings", false); }
 		set { EditorPrefs.SetBool("PolyMeshEditor_uvSettings", value); }
 	}
-
+	
 	static bool editorSettings
 	{
 		get { return EditorPrefs.GetBool("PolyMeshEditor_editorSettings", false); }
 		set { EditorPrefs.SetBool("PolyMeshEditor_editorSettings", value); }
 	}
-
+	
 	static bool autoSnap
 	{
 		get { return EditorPrefs.GetBool("PolyMeshEditor_autoSnap", false); }
 		set { EditorPrefs.SetBool("PolyMeshEditor_autoSnap", value); }
 	}
-
+	
 	static bool globalSnap
 	{
 		get { return EditorPrefs.GetBool("PolyMeshEditor_globalSnap", false); }
 		set { EditorPrefs.SetBool("PolyMeshEditor_globalSnap", value); }
 	}
-
+	
 	static float gridSnap
 	{
 		get { return EditorPrefs.GetFloat("PolyMeshEditor_gridSnap", 1); }
 		set { EditorPrefs.SetFloat("PolyMeshEditor_gridSnap", value); }
 	}
-
+	
 	static bool hideWireframe
 	{
 		get { return EditorPrefs.GetBool("PolyMeshEditor_hideWireframe", true); }
 		set { EditorPrefs.SetBool("PolyMeshEditor_hideWireframe", value); }
 	}
-
+	
 	public KeyCode editKey
 	{
 		get { return (KeyCode)EditorPrefs.GetInt("PolyMeshEditor_editKey", (int)KeyCode.Tab); }
 		set { EditorPrefs.SetInt("PolyMeshEditor_editKey", (int)value); }
 	}
-
+	
 	public KeyCode selectAllKey
 	{
 		get { return (KeyCode)EditorPrefs.GetInt("PolyMeshEditor_selectAllKey", (int)KeyCode.A); }
 		set { EditorPrefs.SetInt("PolyMeshEditor_selectAllKey", (int)value); }
 	}
-
+	
 	public KeyCode splitKey
 	{
 		get { return (KeyCode)EditorPrefs.GetInt("PolyMeshEditor_splitKey", (int)KeyCode.S); }
 		set { EditorPrefs.SetInt("PolyMeshEditor_splitKey", (int)value); }
 	}
-
+	
 	public KeyCode extrudeKey
 	{
 		get { return (KeyCode)EditorPrefs.GetInt("PolyMeshEditor_extrudeKey", (int)KeyCode.D); }
 		set { EditorPrefs.SetInt("PolyMeshEditor_extrudeKey", (int)value); }
 	}
-
+	
 	#endregion
-
+	
 	#region Menu Items
-
+	
 	[MenuItem("GameObject/Create Other/PolyMesh", false, 1000)]
 	static void CreatePolyMesh()
 	{
@@ -1191,14 +1183,14 @@ public class PolyMeshEditor : Editor
 		var polyMesh = obj.AddComponent<PolyMesh>();
 		CreateSquare(polyMesh, 0.5f);
 	}
-
+	
 	static void CreateSquare(PolyMesh polyMesh, float size)
 	{
-		polyMesh.keyPoints.AddRange(new Vector3[] { new Vector3(size, size), new Vector3(size, -size), new Vector3(-size, -size), new Vector3(-size, size)} );
-		polyMesh.curvePoints.AddRange(new Vector3[] { Vector3.zero, Vector3.zero, Vector3.zero, Vector3.zero } );
-		polyMesh.isCurve.AddRange(new bool[] { false, false, false, false } );
+		polyMesh.keyPoints.AddRange(new Vector3[] { new Vector3(size, size), new Vector3(size, -size), new Vector3(-size, -size), new Vector3(-size, size) });
+		polyMesh.curvePoints.AddRange(new Vector3[] { Vector3.zero, Vector3.zero, Vector3.zero, Vector3.zero });
+		polyMesh.isCurve.AddRange(new bool[] { false, false, false, false });
 		polyMesh.BuildMesh();
 	}
-
+	
 	#endregion
 }
