@@ -1,8 +1,4 @@
-﻿#if UNITY_2_6 || UNITY_3_0 || UNITY_3_1 || UNITY_3_2 || UNITY_3_3 || UNITY_3_4 || UNITY_3_5 || UNITY_4_0 || UNITY_4_1 || UNITY_4_2
-#define UNITY_4_2_OR_LOWER
-#endif
-
-using UnityEngine;
+﻿using UnityEngine;
 using System.Collections;
 using System.Collections.Generic;
 
@@ -13,19 +9,19 @@ public class PolyMesh : MonoBehaviour
 	public List<Vector3> curvePoints = new List<Vector3>();
 	public List<bool> isCurve = new List<bool>();
 	public MeshCollider meshCollider;
-#if !UNITY_4_2_OR_LOWER
 	public PolygonCollider2D polyCollider;
-#endif
+
 	[Range(0.01f, 1)] public float curveDetail = 0.1f;
 	public float colliderDepth = 1;
 	public bool buildColliderEdges = true;
 	public bool buildColliderFront;
-#if !UNITY_4_2_OR_LOWER
-	public bool buildColliderPolygonCollider;
-#endif
+	public bool buildColliderPolygonCollider = true;
 	public Vector2 uvPosition;
 	public float uvScale = 1;
 	public float uvRotation;
+
+	public Color meshVertexColor = Color.white;
+	public Color[] colors;
 	
 	public List<Vector3> GetEdgePoints()
 	{
@@ -86,10 +82,16 @@ public class PolyMesh : MonoBehaviour
 			mesh.name = "PolySprite_Mesh";
 			meshFilter.mesh = mesh;
 		}
-		
+
+		colors = new Color[vertices.Length];
+		for (int i = 0; i < vertices.Length; i++) {
+			colors[i] = meshVertexColor;
+		}
+
 		//Update the mesh
 		mesh.Clear();
 		mesh.vertices = vertices;
+		mesh.colors = colors;
 		mesh.uv = uv;
 		mesh.triangles = triangles;
 		mesh.RecalculateNormals();
@@ -101,7 +103,6 @@ public class PolyMesh : MonoBehaviour
 	
 	void UpdateCollider(List<Vector3> points, int[] tris)
 	{
-#if !UNITY_4_2_OR_LOWER
 		//Update the polygon collider if there is one
 		if (polyCollider != null) 
 		{
@@ -113,7 +114,7 @@ public class PolyMesh : MonoBehaviour
 
 			polyCollider.SetPath(0, points2d);
 		}
-#endif
+
 		//Update the mesh collider if there is one
 		if (meshCollider != null)
 		{
